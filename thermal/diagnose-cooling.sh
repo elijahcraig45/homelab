@@ -29,8 +29,8 @@ busy() { # average busy cores over $1 seconds
 
 LOADPIDS=()
 restore() {
-  # Kill load generators by explicit PID. BUILD-LOG's own note: do NOT rely on
-  # job control here, reparented children survive it.
+  # Kill load generators by explicit PID. Don't rely on job control here:
+  # reparented children survive it.
   for p in "${LOADPIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
   echo
   echo "restoring Immich..."

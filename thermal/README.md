@@ -36,10 +36,9 @@ Three findings that shaped the fix:
    capped:     2.5 cores x 2.4 GHz = 6.0 core-GHz   <- ~33% faster, and cooler
    ```
 
-3. **The 00:00 nightly job is the trigger.** BUILD-LOG's earlier entry listed this as
-   "unconfirmed"; the queue mix here (`missingThumbnails` cascading into faceDetection →
-   facialRecognition → ocr across all 18,696 assets) matches it exactly. Hence the 23:30
-   night switch below.
+3. **The 00:00 nightly job is the trigger.** Until this run it was only a suspicion; the
+   queue mix here (`missingThumbnails` cascading into faceDetection → facialRecognition →
+   ocr across all 18,696 assets) confirms it. Hence the 23:30 night switch below.
 
 4. **Context switches ran at 98k–139k/s.** The ML container defaulted its request pool
    to 4 threads while pinned to 3 cores, on top of 6 job workers. Oversubscription

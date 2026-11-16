@@ -13,7 +13,7 @@ D=$(realpath "$1")
 case "$D" in
   /mnt/storage/media*|/mnt/storage/torrents*)
     echo "refusing: $D is re-downloadable media, deliberately never backed up."
-    echo "  (media is what makes offsite affordable - see BUILD-LOG)"; exit 1;;
+    echo "  (leaving media out is what keeps the offsite copy affordable)"; exit 1;;
 esac
 case $MODE in
   add)     touch "$D/.backup";   rm -f "$D/.nobackup"; echo "marked for backup:  $D";;
