@@ -1,0 +1,25 @@
+# The whole homelab, top to bottom.
+#
+#   ansible-playbook site.yml --check --diff     # what would change; touches nothing
+#   ansible-playbook site.yml --diff             # apply
+#   ansible-playbook site.yml --check --tags samba
+#
+# Rule: the first real apply on a host only happens after `--check` shows the expected diff and nothing else.
+- name: homelab
+  hosts: homelab
+  roles:
+    - { role: base,          tags: [base] }
+    - { role: firewall,      tags: [firewall] }
+    - { role: storage,       tags: [storage] }
+    - { role: docker,        tags: [docker] }
+    - { role: samba,         tags: [samba] }
+    - { role: tailscale,     tags: [tailscale] }
+    - { role: alerting,      tags: [alerting] }
+    - { role: backup,        tags: [backup] }
+    - { role: launcher,      tags: [launcher] }
+    - { role: picture_frame, tags: [picture_frame] }
+    - { role: jupyter,       tags: [jupyter] }
+    - { role: mllab,         tags: [mllab] }
+    - { role: pipeline,      tags: [pipeline] }
+    - { role: ml4t,          tags: [ml4t] }
+    - { role: secrets,       tags: [secrets] }

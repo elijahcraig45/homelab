@@ -1,0 +1,6 @@
+all:
+  hosts:
+    homelab:
+      # `homelab` is an ~/.ssh/config alias on the control machine (user homelab, key auth).
+      ansible_host: homelab
+      ansible_user: homelab

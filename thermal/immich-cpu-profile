@@ -1,0 +1,66 @@
+#!/bin/bash
+# Set the Immich CPU profile (the TARGET; immich-thermal-guard enforces it).
+#
+# Total ceiling is 2.5 cores in both profiles - only the split changes. That
+# keeps the SoC off the 85 C soft limit, which is a throughput WIN not a loss:
+#   throttled 3 x 1.5 GHz = 4.5 core-GHz  vs  capped 2.5 x 2.4 GHz = 6.0.
+#
+#   day   - server favoured: thumbnailGeneration feeds every other queue, and
+#           thumbnails are what the web UI and phone app actually wait on.
+#   night - ML favoured: faceDetection / facialRecognition / ocr grind down the
+#           backlog while nobody is looking at the library.
+#
+# Usage: immich-cpu-profile day|night|status
+set -euo pipefail
+
+STATEDIR=/var/lib/immich-thermal
+CONF=${IMMICH_GUARD_CONF:-/etc/immich-thermal.conf}
+ML=immich_machine_learning
+SRV=immich_server
+
+HOT=76.0; DAY_ML=0.6; DAY_SRV=1.2; NIGHT_ML=1.2; NIGHT_SRV=0.6
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+ml_for()  { case "$1" in day) echo "$DAY_ML" ;; night) echo "$NIGHT_ML" ;; esac; }
+srv_for() { case "$1" in day) echo "$DAY_SRV" ;; night) echo "$NIGHT_SRV" ;; esac; }
+
+case "${1:-status}" in
+  day|night)
+    prof="$1"
+    install -d -m 755 "$STATEDIR"
+    echo "$prof" > "$STATEDIR/profile"
+    # Clear any guard back-off so the new profile starts from its full target.
+    rm -f "$STATEDIR/ml_cpus" "$STATEDIR/srv_cpus" "$STATEDIR/hot_streak"
+    /usr/local/bin/immich-thermal-guard --apply-now
+    echo "immich cpu profile -> $prof (ceiling ml=$(ml_for "$prof") server=$(srv_for "$prof"); guard holds <${HOT} C)"
+    ;;
+  status)
+    printf 'target profile: %s   (guard holds SoC under %s C)\n\n' \
+      "$(cat "$STATEDIR/profile" 2>/dev/null || echo '(unset)')" "$HOT"
+    for c in "$SRV" "$ML"; do
+      if docker inspect "$c" >/dev/null 2>&1; then
+        nc=$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$c")
+        cs=$(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$c")
+        mm=$(docker inspect -f '{{.HostConfig.Memory}}' "$c")
+        printf '%-28s cpus=%-6s cpuset=%-6s mem=%s\n' "$c" \
+          "$(awk -v n="$nc" 'BEGIN{if(n+0>0) printf "%.2f", n/1e9; else printf "none"}')" \
+          "${cs:-none}" \
+          "$(awk -v m="$mm" 'BEGIN{if(m+0>0) printf "%.2f GiB", m/1073741824; else printf "none"}')"
+      else
+        printf '%-28s MISSING\n' "$c"
+      fi
+    done
+    echo
+    printf 'soc temp:  %.1f C\n' "$(awk '{print $1/1000}' /sys/class/thermal/thermal_zone0/temp)"
+    printf 'arm clock: %s\n' "$(vcgencmd measure_clock arm | cut -d= -f2 | awk '{printf "%.2f GHz", $1/1e9}')"
+    printf 'throttled: %s   # want 0x0 in the low nibble; bit2 (0x4) = throttling NOW\n' \
+      "$(vcgencmd get_throttled | cut -d= -f2)"
+    printf 'ceiling:   ml=%s server=%s (guard trims below these as needed)\n' \
+      "$(ml_for "$(cat "$STATEDIR/profile" 2>/dev/null || echo day)")" \
+      "$(srv_for "$(cat "$STATEDIR/profile" 2>/dev/null || echo day)")"
+    printf 'fan:       %s rpm (max observed 9724)\n' "$(cat /sys/class/hwmon/hwmon3/fan1_input 2>/dev/null || echo '?')"
+    awk 'NR==2{printf "zram:      %.0f MiB free of %.0f MiB\n", ($3-$4)/1024, $3/1024}' /proc/swaps
+    ;;
+  *) echo "usage: $0 day|night|status" >&2; exit 2 ;;
+esac

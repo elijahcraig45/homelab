@@ -1,0 +1,65 @@
+# Local constraints layered over Immich's official compose.
+# Keeps the upstream file untouched so it can be re-fetched on upgrade.
+#
+# THERMAL/STABILITY PROFILE (2026-09-17)
+# --------------------------------------
+# `cpuset` is only AFFINITY. Both containers could still saturate all 3 pinned
+# cores, which held the SoC at the 85 C soft limit and capped it to 1.5 GHz
+# (throttled=0xf0006). The `cpus:` HARD QUOTAS are what keep it off the trip
+# point, and they are worth more than they cost:
+#
+#   throttled:  3 cores x 1.5 GHz = 4.5 core-GHz
+#   capped:   2.5 cores x 2.4 GHz = 6.0 core-GHz   <- faster AND cooler
+#
+# The values below are only a STARTING CEILING. immich-thermal-guard trims
+# below them to hold a temperature (HOT in /etc/immich-thermal.conf, default
+# 76 C). The total is 1.8 cores, not 2.5: measured host baseline is ~1.3 cores
+# (tailscaled ~0.44, mergerfs ~0.20, misc ~0.65) BEFORE Immich gets any, so a
+# 2.5-core Immich ceiling saturated the governor at ~84 C with nowhere to go.
+#
+# Values here are the conservative DAY profile so that any `compose up -d`
+# lands in a safe state. immich-day/night-profile.timer shift the split live
+# via `docker update` (no recreate); immich-thermal-guard.timer trims further
+# if ambient heat pushes it over anyway.
+services:
+  immich-server:
+    # RETUNED 2026-09-19 for the OptiPlex 7070 (6C/6T, 16 GB, idles ~42 C).
+    # The 1.2-core cap and cpuset existed only for the Pi's broken cooling; this
+    # box never throttles, so the "capped beats throttled" maths no longer applies.
+    mem_limit: 5g            # libvips peaks are real: 2g OOM-killed 24x on the Pi
+    cpus: "4.0"
+    ports: !override
+      - "2283:2283"          # LAN-visible; iOS app wants a real host
+    volumes:
+      - ${UPLOAD_LOCATION}:/data
+      # thumbnails are small, hot and numerous - keep them off the spinning pool
+      - /mnt/appdata/immich/thumbs:/data/thumbs
+      - /etc/localtime:/etc/localtime:ro
+
+  immich-machine-learning:
+    mem_limit: 3g
+    cpus: "3.0"
+    environment:
+      # The container defaulted its request pool to 4 threads while pinned to 3
+      # cores, on top of 6 concurrent job workers -> 98k-139k context switches/s,
+      # which is heat with no throughput. Pin the concurrency explicitly so the
+      # thread count can never exceed the cgroup quota again.
+      - MACHINE_LEARNING_WORKERS=1
+      - MACHINE_LEARNING_REQUEST_THREADS=4
+      - MACHINE_LEARNING_MODEL_INTER_OP_THREADS=2
+      - MACHINE_LEARNING_MODEL_INTRA_OP_THREADS=4
+      - MACHINE_LEARNING_MODEL_ARENA=true
+
+  redis:
+    mem_limit: 512m
+
+  database:
+    # 512 MB shared_buffers inside a 1 GB cap was brushing OOM under sync load.
+    mem_limit: 3g
+    # MUST keep config_file= first: that file carries shared_preload_libraries=vchord.so,
+    # without which the vectorchord extension fails and immich_server crash-loops.
+    # Later -c flags override values set in the config file.
+    command: >-
+      postgres -c config_file=/etc/postgresql/postgresql.conf
+               -c shared_buffers=1GB -c effective_cache_size=8GB
+               -c work_mem=32MB -c maintenance_work_mem=256MB

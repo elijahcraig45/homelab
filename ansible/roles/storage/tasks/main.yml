@@ -1,0 +1,53 @@
+# Data disks, the mergerfs pool, and SMART monitoring.
+# `state: present` writes fstab only. Mounting is left to boot, so a run never remounts the pool under live containers.
+- name: Data disk mount points
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ data_disks }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Data disks in fstab
+  ansible.posix.mount:
+    path: "{{ item.path }}"
+    src: "UUID={{ item.uuid }}"
+    fstype: ext4
+    opts: "{{ data_disk_opts }}"
+    dump: "0"
+    passno: "2"
+    state: present
+  loop: "{{ data_disks }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: mergerfs pool in fstab
+  ansible.posix.mount:
+    path: "{{ pool_path }}"
+    src: "{{ data_disks | map(attribute='path') | map('regex_replace', '$', '/pool') | join(':') }}"
+    fstype: fuse.mergerfs
+    opts: "{{ pool_opts }}"
+    dump: "0"
+    passno: "0"
+    state: present
+
+- name: The pool is mounted right now
+  ansible.builtin.command: findmnt -n -o FSTYPE {{ pool_path }}
+  register: pool_fstype
+  changed_when: false
+  check_mode: false
+  failed_when: pool_fstype.stdout != 'fuse.mergerfs'
+
+- name: smartd config (per-disk schedules, ntfy on failure)
+  ansible.builtin.copy:
+    src: smartd.conf
+    dest: /etc/smartd.conf
+    mode: "0644"
+  notify: restart smartd
+
+- name: smartd running
+  ansible.builtin.systemd_service:
+    name: smartd
+    enabled: true
+    state: started

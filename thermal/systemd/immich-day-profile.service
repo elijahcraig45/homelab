@@ -1,0 +1,8 @@
+[Unit]
+Description=Switch Immich to the day CPU profile (thumbnails favoured)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/immich-cpu-profile day

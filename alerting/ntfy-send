@@ -1,0 +1,13 @@
+#!/bin/bash
+# POST a notification to the configured ntfy topic.
+# Usage: ntfy-send <title> <message> [priority] [tags]
+set -euo pipefail
+CONF=/etc/ntfy-alert.conf
+[ -r "$CONF" ] || { echo "no $CONF" >&2; exit 1; }
+. "$CONF"   # provides NTFY_URL
+curl -s -m 10 \
+  -H "Title: ${1:-pihome}" \
+  -H "Priority: ${3:-high}" \
+  -H "Tags: ${4:-warning}" \
+  -d "${2:-alert}" \
+  "${NTFY_URL}" >/dev/null

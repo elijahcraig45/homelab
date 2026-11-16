@@ -1,0 +1,17 @@
+[Unit]
+Description=Give Immich ML the larger CPU share overnight
+
+[Timer]
+# 23:30, NOT 01:00: Immich's own nightly job (missingThumbnails +
+# clusterNewFaces + generateMemories) fires at 00:00, and that cascade is what
+# triggered the 2026-09-17 backfill. Be in night mode BEFORE it starts, or the
+# biggest burst of the day runs against the conservative day quota.
+OnCalendar=*-*-* 23:30:00
+AccuracySec=1min
+# Deliberately NOT Persistent: waking from downtime at 10:00 should not put
+# the box into night mode while someone is using it.
+Persistent=false
+Unit=immich-night-profile.service
+
+[Install]
+WantedBy=timers.target

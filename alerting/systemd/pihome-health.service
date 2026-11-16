@@ -1,0 +1,14 @@
+[Unit]
+Description=pihome health probe -> Uptime Kuma
+After=docker.service uptime-kuma.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pihome-health
+ExecStartPost=-/usr/local/bin/pihome-alert
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=180
+# a failing probe is a reported condition, not a broken unit
+SuccessExitStatus=0 1

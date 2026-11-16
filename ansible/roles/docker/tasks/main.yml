@@ -1,0 +1,43 @@
+# Docker engine config and the two compose projects (media stack, Immich).
+- name: Docker daemon config (pinned DNS, see docker/README.md)
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/docker/daemon.json"
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  notify: docker daemon config changed
+
+- name: Docker running
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Compose project directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: [/opt/stack, /opt/stack/immich]
+
+- name: Compose files
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/docker/{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0664"
+  loop:
+    - { src: stack/docker-compose.yml, dest: /opt/stack/docker-compose.yml }
+    - { src: immich/docker-compose.yml, dest: /opt/stack/immich/docker-compose.yml }
+    - { src: immich/docker-compose.override.yml, dest: /opt/stack/immich/docker-compose.override.yml }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: compose_files
+
+# The .env files hold per-host values and the Immich DB password; the secrets role checks they exist.
+# `pull: never` means a run never upgrades an image. Upgrades are a deliberate, separate step.
+- name: Compose projects up to date with their files
+  community.docker.docker_compose_v2:
+    project_src: "{{ item }}"
+    state: present
+    pull: never
+    remove_orphans: false
+  loop: [/opt/stack, /opt/stack/immich]

@@ -1,0 +1,11 @@
+[Unit]
+Description=Offsite backup to GCS
+After=network-online.target docker.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/storage /mnt/appdata
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/bin/backup-run

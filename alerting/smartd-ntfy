@@ -1,0 +1,6 @@
+#!/bin/bash
+# smartd -M exec handler -> ntfy. smartd sets SMARTD_* env vars on a drive warning/error.
+/usr/local/bin/ntfy-send \
+  "⚠ pihome SMART: ${SMARTD_DEVICE:-drive}" \
+  "${SMARTD_MESSAGE:-SMART alert on a drive}" \
+  urgent "floppy_disk,rotating_light"

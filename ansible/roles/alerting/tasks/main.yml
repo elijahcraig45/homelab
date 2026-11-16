@@ -1,0 +1,13 @@
+# Host health probe (every 2 min -> Uptime Kuma push, ntfy on trouble) and the small alert helpers.
+- name: Alerting scripts and units
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ repo_root }}/alerting/ntfy-send",    dest: /usr/local/bin/ntfy-send,    mode: "0755" }
+      - { src: "{{ repo_root }}/alerting/pihome-alert", dest: /usr/local/bin/pihome-alert, mode: "0755" }
+      - { src: "{{ repo_root }}/alerting/pihome-health", dest: /usr/local/bin/pihome-health, mode: "0755" }
+      - { src: "{{ repo_root }}/alerting/smartd-ntfy",  dest: /usr/local/bin/smartd-ntfy,  mode: "0755" }
+      - { src: "{{ repo_root }}/alerting/systemd/pihome-health.service", dest: /etc/systemd/system/pihome-health.service }
+      - { src: "{{ repo_root }}/alerting/systemd/pihome-health.timer",   dest: /etc/systemd/system/pihome-health.timer }
+    managed_units:
+      - { name: pihome-health.timer, enabled: true, state: started }

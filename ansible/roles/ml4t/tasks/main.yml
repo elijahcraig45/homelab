@@ -1,0 +1,22 @@
+# ML4T exam-prep app (:8896). Units come from the ml4t repo; the app is installed by ml4t/host/install.sh.
+- name: ml4t app is installed
+  ansible.builtin.stat:
+    path: /opt/ml4t/venv/bin/uvicorn
+  register: ml4t_venv
+
+- name: Check the ml4t install
+  ansible.builtin.assert:
+    that: ml4t_venv.stat.exists
+    fail_msg: /opt/ml4t/venv is missing. Run ml4t/host/install.sh on the host first.
+    quiet: true
+
+- name: ml4t units
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ ml4t_repo }}/host/ml4t-api.service",    dest: /etc/systemd/system/ml4t-api.service }
+      - { src: "{{ ml4t_repo }}/host/ml4t-backup.service", dest: /etc/systemd/system/ml4t-backup.service }
+      - { src: "{{ ml4t_repo }}/host/ml4t-backup.timer",   dest: /etc/systemd/system/ml4t-backup.timer }
+    managed_units:
+      - { name: ml4t-api.service,  enabled: true, state: started }
+      - { name: ml4t-backup.timer, enabled: true, state: started }

@@ -1,0 +1,19 @@
+# Coursework JupyterLab (conda env CS6475 under /opt/conda). The conda envs themselves are not managed here.
+- name: Conda install is present
+  ansible.builtin.stat:
+    path: /opt/conda/envs/CS6475/bin/jupyter
+  register: conda_jupyter
+
+- name: Check the conda env
+  ansible.builtin.assert:
+    that: conda_jupyter.stat.exists
+    fail_msg: /opt/conda/envs/CS6475 is missing. Reinstall Miniforge and recreate the env before this unit can start.
+    quiet: true
+
+- name: JupyterLab unit
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ role_path }}/files/jupyter.service", dest: /etc/systemd/system/jupyter.service }
+    managed_units:
+      - { name: jupyter.service, enabled: true, state: started }

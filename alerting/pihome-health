@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""pihome health probe -> Uptime Kuma push monitor.
+
+Covers what an HTTP monitor cannot see: supply voltage, thermals, SMART, pool
+capacity, container restart loops, and DNS inside the containers. Immich OOM-looped 24 times overnight on
+2026-09-16 while every HTTP check stayed green, because `restart: always` brought
+it back in seconds -- restart-count deltas are the signal that catches that.
+
+stdlib only, same as frame-sync. Runs as root from pihome-health.timer.
+"""
+import json, os, socket, subprocess, sys, time, urllib.parse, urllib.request
+
+CONF  = "/etc/pihome-health.conf"
+STATE = "/var/lib/pihome-health/state.json"
+KUMA  = "http://127.0.0.1:3001"
+
+# Immich intentionally stopped 2026-09-17 (deferred to the new server; photos are
+# backed up in iCloud + a PC). Re-add the four immich_* names when it comes back.
+CONTAINERS = ["jellyfin", "sonarr", "radarr", "lidarr", "bazarr", "prowlarr",
+              "qbittorrent", "seerr", "flaresolverr", "caddy", "filebrowser",
+              "adguardhome", "uptime-kuma",
+              "immich_server", "immich_machine_learning",
+              "immich_postgres", "immich_redis",
+              "paperless", "paperless-redis"]
+
+# Containers resolve outside names through Docker's embedded DNS, which is probed from inside one of these (busybox nslookup).
+DNS_PROBES  = ("caddy", "sonarr", "prowlarr")
+DNS_NAMES   = ("example.com", "cloudflare.com")
+
+TEMP_WARN   = 78.0   # soft-throttle starts at 80
+POOL_MIN_PC = 10.0
+ROOT_MIN_PC = 10.0
+SWAP_MAX_PC = 85.0
+SMART_EVERY = 1800   # seconds; don't hammer the drives
+
+
+def sh(*a, timeout=60):
+    try:
+        p = subprocess.run(a, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except Exception as e:
+        return 127, str(e)
+
+
+def load(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def conf():
+    c = {}
+    try:
+        for line in open(CONF):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                c[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return c
+
+
+# ---------------------------------------------------------------- checks
+
+def check_containers(st, problems):
+    rc, out = sh("docker", "ps", "-a", "--format", "{{.Names}}\t{{.State}}")
+    if rc != 0:
+        problems.append("docker ps failed")
+        return {}
+    state = dict(l.split("\t") for l in out.strip().splitlines() if "\t" in l)
+    for name in CONTAINERS:
+        if name not in state:
+            problems.append(f"{name} missing")
+        elif state[name] != "running":
+            problems.append(f"{name} {state[name]}")
+
+    # restart-count deltas -- the OOM-loop detector
+    counts, prev = {}, st.get("restarts", {})
+    for name in CONTAINERS:
+        if name not in state:
+            continue
+        rc, out = sh("docker", "inspect", "-f", "{{.RestartCount}}", name)
+        if rc != 0:
+            continue
+        try:
+            counts[name] = int(out.strip())
+        except ValueError:
+            continue
+        # a recreate resets the counter, so only a rise is meaningful
+        if name in prev and counts[name] > prev[name]:
+            problems.append(f"{name} restarted {counts[name] - prev[name]}x")
+    return counts
+
+
+def check_kernel(st, problems):
+    since = st.get("last_run")
+    args = ["journalctl", "-k", "--no-pager", "-q"]
+    args += ["--since", f"@{int(since)}"] if since else ["--since", "-10min"]
+    rc, out = sh(*args)
+    if rc != 0:
+        return
+    uv = sum("Undervoltage detected" in l for l in out.splitlines())
+    oom = [l for l in out.splitlines() if "Killed process" in l]
+    if uv:
+        problems.append(f"undervoltage x{uv}")
+    if oom:
+        procs = set()
+        for l in oom:
+            if "(" in l and ")" in l:
+                procs.add(l.split("(", 1)[1].split(")", 1)[0])
+        problems.append(f"OOM-killed: {', '.join(sorted(procs))} x{len(oom)}")
+
+
+def _sysfs_temp():
+    """CPU temperature on x86, where vcgencmd does not exist.
+
+    Prefer the CPU package zone; fall back to the hottest zone that is not a
+    passive/ACPI placeholder. Returns degrees C, or None."""
+    best = None
+    root = "/sys/class/thermal"
+    try:
+        zones = sorted(os.path.join(root, d) for d in os.listdir(root)
+                       if d.startswith("thermal_zone"))
+    except OSError:
+        return None
+    for z in zones:
+        try:
+            with open(os.path.join(z, "type")) as f:
+                kind = f.read().strip()
+            with open(os.path.join(z, "temp")) as f:
+                t = int(f.read().strip()) / 1000.0
+        except (OSError, ValueError):
+            continue
+        if not (0.0 < t < 125.0):
+            continue
+        if kind in ("x86_pkg_temp", "coretemp"):
+            return t
+        if kind != "acpitz" and (best is None or t > best):
+            best = t
+    return best
+
+
+def check_thermal(problems, facts):
+    rc, out = sh("vcgencmd", "measure_temp")
+    if rc == 0 and "=" in out:
+        try:
+            t = float(out.split("=")[1].split("'")[0])
+            facts["temp"] = f"{t:.0f}C"
+            if t >= TEMP_WARN:
+                problems.append(f"SoC {t:.1f}C")
+        except ValueError:
+            pass
+    else:
+        t = _sysfs_temp()
+        if t is not None:
+            facts["temp"] = f"{t:.0f}C"
+            if t >= TEMP_WARN:
+                problems.append(f"CPU {t:.1f}C")
+    rc, out = sh("vcgencmd", "get_throttled")
+    if rc == 0 and "=" in out:
+        v = int(out.strip().split("=")[1], 16)
+        if v & 0x1:
+            problems.append("under-voltage NOW")
+        if v & 0x4:
+            problems.append("throttled NOW")
+
+
+def check_space(problems, facts):
+    for path, floor in (("/mnt/storage", POOL_MIN_PC), ("/", ROOT_MIN_PC)):
+        try:
+            s = os.statvfs(path)
+        except OSError:
+            problems.append(f"{path} unreadable")
+            continue
+        free_pc = 100.0 * s.f_bavail / s.f_blocks if s.f_blocks else 0.0
+        free_tb = s.f_bavail * s.f_frsize / 1e12
+        if path == "/mnt/storage":
+            facts["pool"] = f"{free_tb:.1f}TB free"
+        if free_pc < floor:
+            problems.append(f"{path} {free_pc:.1f}% free")
+
+    # mergerfs dropping a branch is silent -- check the members are still there
+    rc, out = sh("findmnt", "-rno", "TARGET")
+    mounts = set(out.split())
+    for m in ("/mnt/disk1", "/mnt/disk2", "/mnt/storage"):
+        if m not in mounts:
+            problems.append(f"{m} not mounted")
+
+    try:
+        with open("/proc/meminfo") as f:
+            mi = {k: int(v.split()[0]) for k, v in
+                  (l.split(":", 1) for l in f)}
+        tot, free = mi.get("SwapTotal", 0), mi.get("SwapFree", 0)
+        if tot:
+            used_pc = 100.0 * (tot - free) / tot
+            facts["swap"] = f"{used_pc:.0f}%"
+            if used_pc > SWAP_MAX_PC:
+                problems.append(f"swap {used_pc:.0f}%")
+    except Exception:
+        pass
+
+
+def check_smart(st, problems, facts):
+    now = time.time()
+    if now - st.get("smart_at", 0) < SMART_EVERY:
+        if st.get("smart_problems"):
+            problems.extend(st["smart_problems"])
+        facts["smart"] = st.get("smart_facts", "cached")
+        return st.get("smart_at"), st.get("smart_problems", []), facts.get("smart")
+
+    found, bits = [], []
+    for dev in ("sda", "sdb"):
+        rc, out = sh("smartctl", "-n", "standby", "-d", "sat", "-H", "-A",
+                     f"/dev/{dev}", timeout=90)
+        if "STANDBY" in out.upper() and "PASSED" not in out:
+            bits.append(f"{dev}:standby")
+            continue
+        if "PASSED" not in out:
+            found.append(f"{dev} SMART not PASSED")
+            continue
+        bad = []
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) >= 10 and f[0] in ("5", "197", "198"):
+                try:
+                    if int(f[9]) != 0:
+                        bad.append(f"{f[1]}={f[9]}")
+                except ValueError:
+                    pass
+        if bad:
+            found.append(f"{dev} {' '.join(bad)}")
+        bits.append(f"{dev}:ok")
+    facts["smart"] = ",".join(bits) if bits else "n/a"
+    problems.extend(found)
+    return now, found, facts["smart"]
+
+
+def check_dns(problems):
+    """AdGuard is host-network behind ufw, so kuma cannot probe it. Ask it directly."""
+    q = (b"\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+         b"\x07example\x03com\x00\x00\x01\x00\x01")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(4)
+    try:
+        s.sendto(q, ("127.0.0.1", 53))
+        data, _ = s.recvfrom(512)
+        if len(data) < 12 or data[:2] != b"\xab\xcd":
+            problems.append("adguard bad DNS reply")
+        elif (data[3] & 0x0F) != 0:
+            problems.append(f"adguard DNS rcode {data[3] & 0x0F}")
+    except Exception as e:
+        problems.append(f"adguard DNS {type(e).__name__}")
+    finally:
+        s.close()
+
+
+def check_container_dns(problems):
+    """Outside DNS from inside the containers, which check_dns (the host's AdGuard) does not cover.
+
+    After the 2026-10-28 power blip Docker started every container before DHCP had written /etc/resolv.conf, so 16 of them got
+    "NO EXTERNAL NAMESERVERS DEFINED" and could not resolve anything outside for 7 days: indexers, RSS sync and Seerr all failed
+    while every HTTP check stayed green. /etc/docker/daemon.json now pins the upstreams; this catches it if that file goes, or if
+    the upstreams stop answering."""
+    rc, out = sh("docker", "ps", "--format", "{{.Names}}")
+    running = set(out.split()) if rc == 0 else set()
+    if not running:
+        return
+    rc, out = sh("docker", "inspect", "-f", "{{.Name}}\t{{.ResolvConfPath}}", *sorted(running))
+    stale = []
+    for line in out.splitlines() if rc == 0 else []:
+        name, _, path = line.lstrip("/").partition("\t")
+        try:
+            with open(path) as f:
+                if "NO EXTERNAL NAMESERVERS" in f.read():
+                    stale.append(name)
+        except OSError:
+            continue
+    if stale:
+        more = f" +{len(stale) - 4}" if len(stale) > 4 else ""
+        problems.append(f"no outside DNS in {', '.join(stale[:4])}{more} (docker restart them)")
+
+    probe = next((c for c in DNS_PROBES if c in running), None)
+    if probe and not any(sh("docker", "exec", probe, "nslookup", n, timeout=15)[0] == 0 for n in DNS_NAMES):
+        problems.append(f"container DNS failing ({probe} cannot resolve {DNS_NAMES[0]})")
+
+
+# ---------------------------------------------------------------- main
+
+def deadman(url, kuma_ok):
+    """External watchdog (a healthchecks.io-style check, set DEADMAN_URL in CONF). Kuma runs on this box, so it cannot report the box
+    being down: a ping every run proves the box is alive, and /fail says Kuma could not be fed, so it cannot alert either.
+    Health problems themselves go to Kuma only, so there are no duplicate alerts."""
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(url.rstrip("/") + ("" if kuma_ok else "/fail"), timeout=10).read()
+    except Exception as e:
+        print(f"deadman ping failed: {e}", file=sys.stderr)
+
+
+def main():
+    token = conf().get("PUSH_TOKEN", "")
+    st = load(STATE, {})
+    problems, facts = [], {}
+    t0 = time.time()
+
+    counts = check_containers(st, problems)
+    check_kernel(st, problems)
+    check_thermal(problems, facts)
+    check_space(problems, facts)
+    smart_at, smart_problems, smart_facts = check_smart(st, problems, facts)
+    check_dns(problems)
+    check_container_dns(problems)
+
+    ok = not problems
+    summary = " | ".join(f"{k} {v}" for k, v in facts.items())
+    msg = summary if ok else "; ".join(problems[:6])
+
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"last_run": t0, "restarts": counts, "smart_at": smart_at,
+                   "smart_problems": smart_problems, "smart_facts": smart_facts,
+                   "ok": ok, "msg": msg}, f)
+    os.replace(tmp, STATE)
+
+    kuma_ok = False
+    if token:
+        qs = urllib.parse.urlencode({"status": "up" if ok else "down",
+                                     "msg": msg[:255],
+                                     "ping": int((time.time() - t0) * 1000)})
+        try:
+            urllib.request.urlopen(f"{KUMA}/api/push/{token}?{qs}", timeout=10).read()
+            kuma_ok = True
+        except Exception as e:
+            print(f"push failed: {e}", file=sys.stderr)
+    deadman(conf().get("DEADMAN_URL", ""), kuma_ok)
+
+    print(("OK: " if ok else "PROBLEM: ") + msg)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

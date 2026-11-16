@@ -1,0 +1,13 @@
+[Unit]
+Description=Return Immich to the responsive day CPU profile
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+AccuracySec=1min
+# Persistent so that after any downtime the box lands in the SAFE profile
+# rather than staying in night mode.
+Persistent=true
+Unit=immich-day-profile.service
+
+[Install]
+WantedBy=timers.target

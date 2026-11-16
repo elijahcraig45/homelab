@@ -1,0 +1,29 @@
+# SMB shares: `files` (also the Paperless inbox) and `timemachine` (capped at 2T).
+- name: Samba config
+  ansible.builtin.copy:
+    src: smb.conf
+    dest: /etc/samba/smb.conf
+    mode: "0644"
+    validate: testparm -s %s
+  notify: restart smbd
+
+- name: Samba running
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [smbd, nmbd]
+
+# smbd binds the addresses an interface has when it starts. If it started before DHCP (see base role), it holds a
+# link-local address and LAN clients get a closed port 445. Check the real LAN address and restart if it is missing.
+- name: Is smbd listening on the LAN address
+  ansible.builtin.command: ss -Hltn "sport = :445"
+  register: smb_listen
+  changed_when: false
+  check_mode: false
+
+- name: smbd needs a restart to bind {{ ansible_default_ipv4.address }}:445
+  ansible.builtin.debug:
+    msg: "smbd listens on: {{ smb_listen.stdout_lines | map('split') | map(attribute=3) | list }}"
+  changed_when: (ansible_default_ipv4.address ~ ':445') not in smb_listen.stdout
+  notify: restart smbd

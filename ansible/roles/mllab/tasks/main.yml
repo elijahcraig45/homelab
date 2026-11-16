@@ -1,0 +1,47 @@
+# mllab (model lab + control app). Units and host scripts come straight from the mllab repo, which stays their
+# source of truth. The app itself (venv under /opt/mllab, data under /mnt/appdata/mllab) is installed by
+# `mllab/host/install.sh` and deployed by `mllab/scripts/deploy_app.sh`; this role only checks it is there.
+- name: mllab is installed
+  ansible.builtin.stat:
+    path: /opt/mllab
+  register: mllab_opt
+
+- name: Check the mllab install
+  ansible.builtin.assert:
+    that: mllab_opt.stat.isdir | default(false)
+    fail_msg: /opt/mllab is missing. Run mllab/host/install.sh on the host first.
+    quiet: true
+
+- name: mllab units and host scripts
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    h: "{{ mllab_repo }}/host"
+    u: /etc/systemd/system
+    managed_files:
+      - { src: "{{ h }}/mllab.slice",               dest: "{{ u }}/mllab.slice" }
+      - { src: "{{ h }}/mllab-api.service",         dest: "{{ u }}/mllab-api.service" }
+      - { src: "{{ h }}/mllab-jupyter.service",     dest: "{{ u }}/mllab-jupyter.service" }
+      - { src: "{{ h }}/mllab-caddy.service",       dest: "{{ u }}/mllab-caddy.service" }
+      - { src: "{{ h }}/mllab-backup.service",      dest: "{{ u }}/mllab-backup.service" }
+      - { src: "{{ h }}/mllab-backup.timer",        dest: "{{ u }}/mllab-backup.timer" }
+      - { src: "{{ h }}/mllab-spool.path",          dest: "{{ u }}/mllab-spool.path" }
+      - { src: "{{ h }}/mllab-spool.service",       dest: "{{ u }}/mllab-spool.service" }
+      - { src: "{{ h }}/mllab-health.service",      dest: "{{ u }}/mllab-health.service" }
+      - { src: "{{ h }}/mllab-health.timer",        dest: "{{ u }}/mllab-health.timer" }
+      - { src: "{{ h }}/mllab-weekly.service",      dest: "{{ u }}/mllab-weekly.service" }
+      - { src: "{{ h }}/mllab-weekly.timer",        dest: "{{ u }}/mllab-weekly.timer" }
+      - { src: "{{ h }}/mllab-modelhealth.service", dest: "{{ u }}/mllab-modelhealth.service" }
+      - { src: "{{ h }}/mllab-modelhealth.timer",   dest: "{{ u }}/mllab-modelhealth.timer" }
+      - { src: "{{ h }}/mllab-health",    dest: /usr/local/bin/mllab-health,  mode: "0755" }
+      - { src: "{{ h }}/backup.sh",       dest: /usr/local/bin/mllab-backup,  mode: "0755" }
+      - { src: "{{ h }}/mllab-jobctl",    dest: /usr/local/sbin/mllab-jobctl, mode: "0750" }
+      - { src: "{{ h }}/Caddyfile.mllab", dest: /etc/mllab/Caddyfile }
+    managed_units:
+      - { name: mllab-api.service,       enabled: true, state: started }
+      - { name: mllab-jupyter.service,   enabled: true, state: started }
+      - { name: mllab-caddy.service,     enabled: true, state: started }
+      - { name: mllab-spool.path,        enabled: true, state: started }
+      - { name: mllab-backup.timer,      enabled: true, state: started }
+      - { name: mllab-health.timer,      enabled: true, state: started }
+      - { name: mllab-weekly.timer,      enabled: true, state: started }
+      - { name: mllab-modelhealth.timer, enabled: true, state: started }

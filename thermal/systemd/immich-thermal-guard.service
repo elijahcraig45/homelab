@@ -1,0 +1,10 @@
+[Unit]
+Description=Trim Immich CPU quotas to keep the SoC off the 85C soft limit
+Documentation=file:///home/pi/homeserver/thermal/README.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/immich-thermal-guard
+# The stack being down is not a failure - the guard exits 0 in that case.

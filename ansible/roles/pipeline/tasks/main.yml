@@ -1,0 +1,35 @@
+# The production prediction pipeline (13 jobs feeding hankstank.com). Units come from mllab/host/pipeline/units.
+# The runtime (/opt/pipeline, pipeline-ctl) is installed by mllab/host/pipeline/install.sh --release --ref <sha>.
+#
+# SAFETY: this role NEVER touches /etc/pipeline/jobs.d. Those mode files (off | dry | live) are the whole
+# single-writer safety model and are changed only with `pipeline-ctl set`. A rebuilt host has none, so every
+# job is `off` until someone turns it on, and a rebuild can never write to BigQuery by accident.
+- name: Pipeline runtime is installed
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: [/opt/pipeline/venv/bin/python, /usr/local/bin/pipeline-ctl]
+  register: pipeline_runtime
+
+- name: Check the pipeline runtime
+  ansible.builtin.assert:
+    that: pipeline_runtime.results | map(attribute='stat.exists') | min
+    fail_msg: The pipeline runtime is missing. Run mllab/host/pipeline/install.sh --release --ref <sha> first.
+    quiet: true
+
+- name: Pipeline unit files
+  ansible.builtin.copy:
+    src: "{{ mllab_repo }}/host/pipeline/units/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: "{{ pipeline_unit_files }}"
+  notify: systemd daemon-reload
+
+- name: Load changed unit files
+  ansible.builtin.meta: flush_handlers
+
+- name: Pipeline timers and path units on
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: "{{ pipeline_unit_files | select('search', '\\.(timer|path)$') | list }}"

@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Edge-triggered ntfy alerting off pihome-health's state.
+Runs as ExecStartPost of pihome-health.service, so it sees the fresh state each cycle.
+Alerts once on a new problem, re-notifies every 30 min while still broken, and sends a
+recovery notice when it clears — so no per-cycle spam."""
+import json, subprocess, time
+STATE = "/var/lib/pihome-health/state.json"
+ASTATE = "/var/lib/pihome-health/alert-state.json"
+RENOTIFY = 1800
+def load(p, d):
+    try: return json.load(open(p))
+    except Exception: return d
+def ntfy(title, msg, prio, tags):
+    try: subprocess.run(["/usr/local/bin/ntfy-send", title, msg, prio, tags], timeout=15)
+    except Exception: pass
+s = load(STATE, {})
+if not s: raise SystemExit
+a = load(ASTATE, {"alerted": False, "at": 0})
+now = time.time(); ok = s.get("ok"); msg = s.get("msg", "")
+if ok is False:
+    if not a["alerted"] or now - a["at"] > RENOTIFY:
+        ntfy("⚠ pihome problem", msg, "high", "warning,rotating_light")
+        a = {"alerted": True, "at": now}
+elif ok is True and a["alerted"]:
+    ntfy("✅ pihome recovered", msg or "all checks green", "default", "white_check_mark")
+    a = {"alerted": False, "at": now}
+json.dump(a, open(ASTATE, "w"))

@@ -1,0 +1,22 @@
+# Immich slideshow on the attached display (picture-frame/README.md). Its config.json is a secret file.
+- name: Picture frame scripts and units
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    pf: "{{ repo_root }}/picture-frame"
+    managed_files:
+      - { src: "{{ pf }}/frame-control", dest: /usr/local/bin/frame-control, mode: "0755" }
+      - { src: "{{ pf }}/frame-dim",     dest: /usr/local/bin/frame-dim,     mode: "0755" }
+      - { src: "{{ pf }}/frame-power",   dest: /usr/local/bin/frame-power,   mode: "0755" }
+      - { src: "{{ pf }}/frame-show",    dest: /usr/local/bin/frame-show,    mode: "0755" }
+      - { src: "{{ pf }}/frame-sync",    dest: /usr/local/bin/frame-sync,    mode: "0755" }
+      - { src: "{{ pf }}/systemd/picture-frame.service",         dest: /etc/systemd/system/picture-frame.service }
+      - { src: "{{ pf }}/systemd/picture-frame-control.service", dest: /etc/systemd/system/picture-frame-control.service }
+      - { src: "{{ pf }}/systemd/picture-frame-dim.service",     dest: /etc/systemd/system/picture-frame-dim.service }
+      - { src: "{{ pf }}/systemd/picture-frame-dim.timer",       dest: /etc/systemd/system/picture-frame-dim.timer }
+      - { src: "{{ pf }}/systemd/picture-frame-sync.service",    dest: /etc/systemd/system/picture-frame-sync.service }
+      - { src: "{{ pf }}/systemd/picture-frame-sync.timer",      dest: /etc/systemd/system/picture-frame-sync.timer }
+    managed_units:
+      - { name: picture-frame.service,         enabled: true, state: started }
+      - { name: picture-frame-control.service, enabled: true, state: started }
+      - { name: picture-frame-dim.timer,       enabled: true, state: started }
+      - { name: picture-frame-sync.timer,      enabled: true, state: started }

@@ -1,0 +1,3 @@
+*.local.json
+picture-frame/config.json
+.DS_Store

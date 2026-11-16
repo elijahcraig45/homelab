@@ -1,0 +1,155 @@
+#!/bin/bash
+# Offsite backup to GCS. Uses `rclone copy`, never `sync`: nothing is ever deleted offsite because it vanished here.
+# The key started append-only (cannot overwrite, so changed files fail with 403). harden-offsite-bucket.sh moves that
+# protection to the bucket (versioning + 90-day soft delete) and lets the key overwrite; until it has run, files that
+# change after their first upload still end the run "COMPLETED WITH ERRORS".
+#
+# Databases are NEVER raw-copied while live - SQLite goes through .backup and
+# Postgres through pg_dump, because a raw copy of an open DB is a corrupt DB.
+#
+# Each snapshot also holds host-config.tar.gz (compose files, /etc, local scripts) and
+# host-packages.txt, so the box can be rebuilt and not only its data. Restore with
+#   tar xzf host-config.tar.gz -C /some/dir     (paths inside are relative to /)
+#
+# `backup-run --dry-snapshot` tests the database dumps and the host-config tarball in a
+# temp dir: no big config tarball, no upload, no alert.
+set -uo pipefail
+BUCKET="gcs:<backup-bucket>"
+STAMP=$(date +%Y%m%d-%H%M%S)
+SNAP="/mnt/storage/backups/appdata-$STAMP"
+LOG="/var/log/backup/run-$STAMP.log"
+LAST="/var/log/backup/last-run.txt"
+DRY=0
+if [ "${1:-}" = "--dry-snapshot" ]; then
+  DRY=1; SNAP=$(mktemp -d /tmp/backup-dry.XXXXXX); LOG="$SNAP/run.log"
+fi
+mkdir -p /var/log/backup "$SNAP"
+exec > >(tee -a "$LOG") 2>&1
+say(){ echo "$(date '+%F %T') $*"; }
+fail=0
+alert(){ [ "$DRY" = 1 ] && return 0; /usr/local/bin/ntfy-send "homelab backup FAILED" "$1 (log: $LOG)" high warning 2>/dev/null || true; }
+
+# Preflight: a missing rclone or an unreachable bucket used to be logged line by line and, for the large directories,
+# not counted as a failure at all (2026-09-20..10-14: no offsite copy was made). Fail loudly, before any work.
+if ! command -v rclone >/dev/null 2>&1; then
+  say "!! rclone is not installed"; alert "rclone is not installed"; exit 1
+fi
+if ! rclone lsf "$BUCKET" --max-depth 1 >/dev/null 2>"$LOG.preflight"; then
+  say "!! cannot reach $BUCKET: $(tr '\n' ' ' < "$LOG.preflight" | cut -c1-200)"; alert "cannot reach the bucket"; exit 1
+fi
+rm -f "$LOG.preflight"
+
+say "=== appdata snapshot -> $SNAP ==="
+
+# --- Postgres (Immich) ---
+if docker ps --format '{{.Names}}' | grep -q immich_postgres; then
+  if docker exec immich_postgres pg_dumpall -U postgres 2>/dev/null | gzip > "$SNAP/immich-postgres.sql.gz"; then
+    say "  immich postgres: $(du -h "$SNAP/immich-postgres.sql.gz" | cut -f1)"
+  else
+    say "  !! immich postgres dump FAILED"; fail=1
+  fi
+fi
+
+# --- SQLite databases ---
+# Paperless and Seerr name theirs db.sqlite3, so *.db alone missed them and they were tarred raw while live.
+n=0
+other=0
+while IFS= read -r db; do
+  rel=${db#/mnt/appdata/}; out="$SNAP/sqlite/${rel}"
+  mkdir -p "$(dirname "$out")"
+  # Not every *.db is SQLite - AdGuard's sessions.db is bbolt, for example.
+  # Dump real SQLite safely; copy anything else verbatim so it is not silently skipped.
+  if [ "$(head -c 15 "$db" 2>/dev/null | tr -d "\0")" = "SQLite format 3" ]; then
+    if sqlite3 "$db" ".backup '$out'" 2>/dev/null; then n=$((n+1)); else say "  !! sqlite backup failed: $db"; fail=1; fi
+  else
+    cp -a "$db" "$out" 2>/dev/null && other=$((other+1)) || { say "  !! copy failed: $db"; fail=1; }
+  fi
+done < <(find /mnt/appdata \( -name '*.db' -o -name '*.sqlite3' -o -name '*.sqlite' \) -size +0 2>/dev/null)
+say "  sqlite databases: $n   non-sqlite .db files copied: $other"
+
+# --- host config: compose files, /etc and local scripts, so the box can be rebuilt, not only its data ---
+# Cloud service-account keys are left out on purpose (their setup scripts make new ones). Large binaries
+# (uv, caddy) and *.bak* files are skipped. Everything else, .env files included, goes in.
+HOST_PATHS=(/opt/stack /etc/samba/smb.conf /etc/ufw /etc/systemd/system /etc/sysctl.d /etc/fstab
+  /etc/caddy-pihome.Caddyfile /etc/mllab /etc/pipeline /etc/ntfy-alert.conf /etc/picture-frame /etc/smartd.conf
+  /etc/ssh/sshd_config.d /etc/cron.d /etc/jupyter-token /etc/docker/daemon.json /usr/local/bin /var/www/pihome)
+find "${HOST_PATHS[@]}" \( -type f -o -type l \) -size -2M \
+  ! -path /etc/pipeline/sa.json ! -path '/etc/mllab/keys/*' ! -name '*.bak*' 2>/dev/null \
+  | sed 's#^/##' > "$SNAP/host-config.list"
+apt-mark showmanual > "$SNAP/host-packages.txt" 2>/dev/null || say "  !! apt-mark showmanual failed"
+tar czf "$SNAP/host-config.tar.gz" -C / -T "$SNAP/host-config.list" 2>/dev/null; rc=$?
+if [ "$rc" -le 1 ] && [ -s "$SNAP/host-config.tar.gz" ]; then  # tar exit 1 = a file changed while read, harmless here
+  say "  host config: $(wc -l < "$SNAP/host-config.list") files, $(du -h "$SNAP/host-config.tar.gz" | cut -f1)"
+else
+  say "  !! host config tarball FAILED (tar exit $rc)"; fail=1
+fi
+rm -f "$SNAP/host-config.list"
+
+if [ "$DRY" = 1 ]; then
+  say "=== dry snapshot only (no config tarball, no upload): $SNAP ==="
+  exit $fail
+fi
+
+# --- everything else in appdata (configs), DBs excluded since dumped above ---
+tar czf "$SNAP/appdata-config.tar.gz" -C /mnt/appdata \
+  --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
+  --exclude='*.sqlite3' --exclude='*.sqlite3-wal' --exclude='*.sqlite3-shm' \
+  --exclude='*.sqlite' --exclude='*.sqlite-wal' --exclude='*.sqlite-shm' \
+  --exclude='immich/postgres' --exclude='immich/thumbs' \
+  --exclude='immich/postgres.*-bak-*' --exclude='mllab/envs' --exclude='_migration' . 2>/dev/null
+# Left out on purpose: immich/postgres is dumped above; thumbs and mllab/envs (per-model venvs, 5.4 GB, ~3 GB of
+# this tarball) are rebuilt by their apps; postgres.*-bak-* and _migration are one-off leftovers from the Pi move.
+say "  config tarball: $(du -h "$SNAP/appdata-config.tar.gz" | cut -f1)"
+
+# --- prune local snapshots beyond 14 days ---
+find /mnt/storage/backups -maxdepth 1 -name 'appdata-*' -type d -mtime +14 -exec rm -rf {} + 2>/dev/null
+say "  local snapshots retained: $(ls -1d /mnt/storage/backups/appdata-* 2>/dev/null | wc -l)"
+
+say ""
+say "=== upload: appdata snapshot ==="
+rclone copy "$SNAP" "$BUCKET/appdata/$STAMP/" --transfers=4 --stats-one-line --stats=30s || { say "  !! upload failed"; fail=1; }
+
+say ""
+say "=== upload: directories marked with .backup ==="
+# The service account is append-only: it can create but never overwrite. That means a
+# file whose CONTENT changes can never be re-uploaded to the same path. So:
+#   small dirs  -> tar into this run\'s timestamped snapshot. Always a fresh path, so
+#                  changes are always captured, and you get point-in-time history.
+#   large dirs  -> incremental copy to a stable path. Only safe for content that is
+#                  written once and never modified (Immich originals, media).
+THRESH_MB=2048
+while IFS= read -r marker; do
+  d=$(dirname "$marker")
+  name=$(echo "${d#/mnt/storage/}" | tr '/' '_')
+  sz=$(du -sm "$d" 2>/dev/null | cut -f1)
+  if [ "${sz:-0}" -lt "$THRESH_MB" ]; then
+    say "  $d (${sz}MB) -> versioned tarball"
+    tar czf "$SNAP/marked-$name.tar.gz" -C "$d" --exclude=.backup --exclude=.nobackup . 2>/dev/null \
+      && rclone copy "$SNAP/marked-$name.tar.gz" "$BUCKET/appdata/$STAMP/" --stats-one-line --stats=30s \
+      || { say "  !! failed: $d"; fail=1; }
+  else
+    say "  $d (${sz}MB) -> incremental to $BUCKET/$name/"
+    # .DS_Store is Finder clutter that changes on every visit, so it can never be re-uploaded under an append-only key.
+    out=$(rclone copy "$d" "$BUCKET/$name/" \
+      --exclude='.backup' --exclude='**/.nobackup' --exclude='.DS_Store' \
+      --exclude-if-present=.nobackup \
+      --transfers=4 --stats-one-line --stats=30s 2>&1)
+    rc=$?
+    echo "$out" | tail -3
+    if [ "$rc" -ne 0 ]; then
+      say "  !! rclone exited $rc for $d"; fail=1
+    fi
+    echo "$out" | grep -qi "forbidden\|denied" && {
+      say "  !! some files CHANGED and cannot be overwritten (append-only):"
+      echo "$out" | grep -oiE "ERROR : [^:]+" | sed "s/^/       /" | sort -u | head -5
+      say "       -> move this dir under the size threshold, or re-mark it"
+      fail=1; }
+  fi
+done < <(find /mnt/storage -maxdepth 4 -name .backup 2>/dev/null)
+
+say ""
+if [ "$fail" = "0" ]; then say "=== BACKUP OK ==="; else say "=== BACKUP COMPLETED WITH ERRORS ==="; alert "completed with errors"; fi
+{ echo "$(date '+%F %T')  $([ "$fail" = 0 ] && echo OK || echo ERRORS)"
+  echo "bucket: $BUCKET"
+  echo "log:    $LOG"; } > "$LAST"
+exit $fail

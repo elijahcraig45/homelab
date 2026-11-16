@@ -1,0 +1,97 @@
+# Example host settings. Copy to host_vars/homelab.yml and fill in your own values.
+# The real file is host-specific (addresses, disks, firewall) and is not published.
+
+repo_root: "{{ playbook_dir }}/.."            # this repo
+mllab_repo: "{{ playbook_dir }}/../../mllab"  # sibling checkouts on the control machine
+ml4t_repo: "{{ playbook_dir }}/../../ml4t"
+
+admin_user: homelab
+admin_groups: [sudo, video, docker, pipeline]
+lan_cidr: 192.0.2.0/24                        # your LAN (192.0.2.0/24 is a documentation range)
+lan_iface: eno1
+tailnet_host: homelab.example-tailnet.ts.net
+
+# Packages installed on purpose. Debian's own base set is left to the installer.
+packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+  - tailscale
+  - mergerfs
+  - fuse3
+  - samba
+  - smartmontools
+  - rclone
+  - ufw
+  - nftables
+  - sqlite3
+  - rsync
+  - tmux
+  - curl
+  - intel-microcode
+
+sysctl:
+  - { file: /etc/sysctl.d/99-server.conf,    name: vm.swappiness,                value: "10" }
+  - { file: /etc/sysctl.d/99-server.conf,    name: vm.vfs_cache_pressure,        value: "50" }
+  - { file: /etc/sysctl.d/99-tailscale.conf, name: net.ipv4.ip_forward,          value: "1" }   # subnet router
+  - { file: /etc/sysctl.d/99-tailscale.conf, name: net.ipv6.conf.all.forwarding, value: "1" }
+
+# Key-only SSH. Turn it on once every device that logs in has a key, or they are locked out.
+sshd_hardening: true
+sshd_settings:
+  PasswordAuthentication: "no"
+  PermitRootLogin: "no"
+  MaxAuthTries: "4"
+
+# Firewall: default deny in, allow out. Admin UIs are loopback-only and reach the tailnet via `tailscale serve`.
+ufw_rules:
+  - { port: "22",   proto: tcp, src: "{{ lan_cidr }}",  comment: SSH from LAN }
+  - { port: "445",  proto: tcp, src: "{{ lan_cidr }}",  comment: SMB from LAN }
+  - { port: "8098", proto: tcp, src: 172.18.0.0/16,     comment: status page via caddy }
+  - { port: "8099", proto: tcp, src: 172.18.0.0/16,     comment: frame control via caddy }
+ufw_allow_interfaces:
+  - { iface: tailscale0, comment: tailnet }
+
+# Data disks pooled with mergerfs. Find the UUIDs with `blkid`.
+data_disks:
+  - { path: /mnt/disk1, uuid: 00000000-0000-0000-0000-000000000001 }
+  - { path: /mnt/disk2, uuid: 00000000-0000-0000-0000-000000000002 }
+data_disk_opts: noatime,nofail,x-systemd.device-timeout=30
+pool_path: /mnt/storage
+pool_opts: >-
+  cache.files=off,category.create=pfrd,func.getattr=newest,dropcacheonclose=false,moveonenospc=true,minfreespace=50G,fsname=mergerfs,nofail,x-systemd.requires=/mnt/disk1,x-systemd.requires=/mnt/disk2
+
+# tailscale serve: tailnet-only HTTPS port -> local target. 445 is a raw TCP forward (SMB over the tailnet).
+tailscale_serve_https:
+  "443": http://127.0.0.1:8090     # launcher (Caddy)
+  "3000": http://127.0.0.1:80      # AdGuard Home
+  "3001": http://127.0.0.1:3001    # Uptime Kuma
+  "8082": http://127.0.0.1:8082    # FileBrowser
+  "8443": http://127.0.0.1:2283    # Immich
+  "8777": http://127.0.0.1:8777    # Paperless
+  "8888": http://127.0.0.1:8888    # JupyterLab
+  "8899": http://127.0.0.1:8899    # ML lab
+tailscale_serve_tcp:
+  "445": 127.0.0.1:445
+
+# Offsite backup selection (backup/backup-run): a `.backup` file marks a directory to copy offsite, and a
+# `.nobackup` file inside it skips that subdirectory.
+backup_markers:
+  - { path: /mnt/storage/files/.backup }
+  - { path: /mnt/storage/photos/.backup }
+  - { path: /mnt/storage/documents/.backup }
+  - { path: /mnt/storage/photos/encoded-video/.nobackup }   # rebuilt from the originals
+  - { path: /mnt/storage/photos/backups/.nobackup }         # duplicated by backup-run's own database dump
+
+# Files that hold secrets or per-host values. They are NEVER in git. The playbook only checks that each exists
+# with the right owner and mode, and says which script creates it when one is missing.
+secret_files:
+  - { path: /etc/pipeline/sa.json,            owner: root,    group: pipeline, mode: "0640", made_by: "mllab/host/pipeline/pipeline-runner-setup.sh" }
+  - { path: /etc/mllab/env,                   owner: root,    group: mllab,    mode: "0640", made_by: "mllab/host/install.sh" }
+  - { path: /etc/backup/gcs-sa.json,          owner: root,    group: root,     mode: "0600", made_by: "backup/setup-offsite-backup.sh" }
+  - { path: /etc/ntfy-alert.conf,             owner: root,    group: root,     mode: "0600", made_by: "by hand (ntfy topic URL)" }
+  - { path: /etc/pihome-health.conf,          owner: root,    group: root,     mode: "0600", made_by: "by hand (Kuma push token, ntfy URL)" }
+  - { path: /opt/stack/.env,                  owner: root,    group: root,     mode: "0664", made_by: "by hand (PUID, PGID, UMASK, TZ, APPDATA, STORAGE)" }
+  - { path: /opt/stack/immich/.env,           owner: root,    group: root,     mode: "0600", made_by: "Immich example.env (DB password)" }

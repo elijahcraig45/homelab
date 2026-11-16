@@ -1,0 +1,55 @@
+# Tailscale: the daemon, UDP GRO tuning for subnet routing, and the `tailscale serve` map
+# (every admin UI is loopback-only and reaches the tailnet through it).
+- name: UDP GRO tuning unit
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ role_path }}/files/tailscale-gro.service", dest: /etc/systemd/system/tailscale-gro.service }
+    managed_units:
+      - { name: tailscale-gro.service, enabled: true, state: started }
+      - { name: tailscaled.service, enabled: true, state: started }
+
+- name: Read the current serve config
+  ansible.builtin.command: tailscale serve status --json
+  register: serve_raw
+  changed_when: false
+  check_mode: false
+
+- name: Work out which serve entries are missing or point elsewhere
+  ansible.builtin.set_fact:
+    serve_web: "{{ (serve_raw.stdout | from_json).Web | default({}) }}"
+    serve_tcp: "{{ (serve_raw.stdout | from_json).TCP | default({}) }}"
+
+# Detection runs in check mode too (set_fact/debug do; `command` would only be skipped), so --check shows drift.
+- name: Find HTTPS entries that are missing or point elsewhere
+  ansible.builtin.set_fact:
+    serve_drift: "{{ serve_drift | default([]) + [{'flag': '--https=' ~ item.key, 'target': item.value}] }}"
+  loop: "{{ tailscale_serve_https | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: (serve_web[tailnet_host ~ ':' ~ item.key].Handlers['/'].Proxy | default('')) != item.value
+
+- name: Find TCP entries that are missing or point elsewhere
+  ansible.builtin.set_fact:
+    serve_drift: "{{ serve_drift | default([]) + [{'flag': '--tcp=' ~ item.key, 'target': 'tcp://' ~ item.value}] }}"
+  loop: "{{ tailscale_serve_tcp | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: (serve_tcp[item.key].TCPForward | default('')) != item.value
+
+- name: Serve entries that need setting
+  ansible.builtin.debug:
+    msg: "{{ serve_drift | default([]) | map(attribute='flag') | list }}"
+  changed_when: serve_drift | default([]) | length > 0
+
+- name: Set serve entries
+  ansible.builtin.command: tailscale serve --bg {{ item.flag }} {{ item.target }}
+  loop: "{{ serve_drift | default([]) }}"
+  loop_control:
+    label: "{{ item.flag }} {{ item.target }}"
+  changed_when: true
+
+- name: Report serve entries that are live but not in the repo
+  ansible.builtin.debug:
+    msg: "tailscale serve has port {{ item }} which host_vars does not list. Add it, or remove it with `tailscale serve --https={{ item }} off`."
+  loop: "{{ serve_tcp.keys() | difference(tailscale_serve_https.keys() | list + tailscale_serve_tcp.keys() | list) }}"

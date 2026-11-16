@@ -1,0 +1,21 @@
+[Unit]
+Description=JupyterLab for coursework (CS6475 / ML4T)
+After=network-online.target
+Wants=network-online.target
+# The notebooks live on the mergerfs pool; do not start before it is mounted.
+RequiresMountsFor=/mnt/storage
+
+[Service]
+Type=simple
+User=homelab
+Group=homelab
+WorkingDirectory=/mnt/storage/files/school
+ExecStart=/opt/conda/envs/CS6475/bin/jupyter lab --config=/home/homelab/.jupyter/jupyter_lab_config.py
+Restart=on-failure
+RestartSec=10
+# Coursework, not a service anyone depends on - keep it behind the media stack.
+Nice=5
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

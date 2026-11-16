@@ -1,0 +1,30 @@
+# Handlers are play-wide, so every role notifies these by name.
+- name: systemd daemon-reload
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: reload ssh
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: reloaded
+
+- name: restart smartd
+  ansible.builtin.systemd_service:
+    name: smartd
+    state: restarted
+
+- name: restart smbd
+  ansible.builtin.systemd_service:
+    name: smbd
+    state: restarted
+
+- name: reload launcher caddy
+  ansible.builtin.command: docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+  changed_when: true
+
+# Restarting dockerd restarts all 19 containers, so it never happens implicitly.
+- name: docker daemon config changed
+  ansible.builtin.debug:
+    msg: >-
+      /etc/docker/daemon.json changed. It takes effect at the next `systemctl restart docker`
+      (restarts every container) or reboot. Not done automatically.

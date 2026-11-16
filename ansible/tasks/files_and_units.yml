@@ -1,0 +1,26 @@
+# Shared by the roles: install a list of files, then set each systemd unit's enabled/active state.
+#   managed_files: [{src, dest, mode?, owner?, group?}]   src is an absolute path on the control machine
+#   managed_units: [{name, enabled?, state?}]              omit `state` for units a timer or path starts
+- name: Install files
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop: "{{ managed_files | default([]) }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: systemd daemon-reload
+
+- name: Load changed unit files before touching unit state
+  ansible.builtin.meta: flush_handlers
+
+- name: Unit state
+  ansible.builtin.systemd_service:
+    name: "{{ item.name }}"
+    enabled: "{{ item.enabled | default(omit) }}"
+    state: "{{ item.state | default(omit) }}"
+  loop: "{{ managed_units | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"

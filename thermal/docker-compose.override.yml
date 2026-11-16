@@ -1,0 +1,56 @@
+# Local constraints layered over Immich's official compose.
+# Keeps the upstream file untouched so it can be re-fetched on upgrade.
+#
+# THERMAL/STABILITY PROFILE (2026-09-17)
+# --------------------------------------
+# `cpuset` is only AFFINITY. Both containers could still saturate all 3 pinned
+# cores, which held the SoC at the 85 C soft limit and capped it to 1.5 GHz
+# (throttled=0xf0006). The `cpus:` HARD QUOTAS are what keep it off the trip
+# point, and they are worth more than they cost:
+#
+#   throttled:  3 cores x 1.5 GHz = 4.5 core-GHz
+#   capped:   2.5 cores x 2.4 GHz = 6.0 core-GHz   <- faster AND cooler
+#
+# The values below are only a STARTING CEILING. immich-thermal-guard trims
+# below them to hold a temperature (HOT in /etc/immich-thermal.conf, default
+# 76 C). The total is 1.8 cores, not 2.5: measured host baseline is ~1.3 cores
+# (tailscaled ~0.44, mergerfs ~0.20, misc ~0.65) BEFORE Immich gets any, so a
+# 2.5-core Immich ceiling saturated the governor at ~84 C with nowhere to go.
+#
+# Values here are the conservative DAY profile so that any `compose up -d`
+# lands in a safe state. immich-day/night-profile.timer shift the split live
+# via `docker update` (no recreate); immich-thermal-guard.timer trims further
+# if ambient heat pushes it over anyway.
+services:
+  immich-server:
+    mem_limit: 3g            # 2g OOM-killed 24x during the first import (libvips peaks)
+    cpuset: "0-2"            # core 3 stays free for Jellyfin+host
+    cpus: "1.2"              # libvips thumbnailing - the queue that feeds all the others
+    ports: !override
+      - "2283:2283"          # LAN-visible; iOS app wants a real host
+    volumes:
+      - ${UPLOAD_LOCATION}:/data
+      # thumbnails are small, hot and numerous - keep them off the spinning pool
+      - /mnt/appdata/immich/thumbs:/data/thumbs
+      - /etc/localtime:/etc/localtime:ro
+
+  immich-machine-learning:
+    mem_limit: 2g
+    cpuset: "0-2"
+    cpus: "0.6"              # day ceiling; night timer raises it to NIGHT_ML
+    environment:
+      # The container defaulted its request pool to 4 threads while pinned to 3
+      # cores, on top of 6 concurrent job workers -> 98k-139k context switches/s,
+      # which is heat with no throughput. Pin the concurrency explicitly so the
+      # thread count can never exceed the cgroup quota again.
+      - MACHINE_LEARNING_WORKERS=1
+      - MACHINE_LEARNING_REQUEST_THREADS=2
+      - MACHINE_LEARNING_MODEL_INTER_OP_THREADS=1
+      - MACHINE_LEARNING_MODEL_INTRA_OP_THREADS=1
+      - MACHINE_LEARNING_MODEL_ARENA=false
+
+  redis:
+    mem_limit: 256m
+
+  database:
+    mem_limit: 1g

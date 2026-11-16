@@ -1,0 +1,35 @@
+# ufw: deny in, allow out, deny routed. Only SSH and SMB from the LAN, plus everything on the tailnet.
+- name: Default policies
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+    - { direction: routed, policy: deny }
+
+- name: Port rules
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    from_ip: "{{ item.src }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ ufw_rules }}"
+  loop_control:
+    label: "{{ item.port }}/{{ item.proto }} from {{ item.src }}"
+
+- name: Interface rules
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ item.iface }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ ufw_allow_interfaces }}"
+  loop_control:
+    label: "{{ item.iface }}"
+
+- name: Firewall on, low logging
+  community.general.ufw:
+    state: enabled
+    logging: low

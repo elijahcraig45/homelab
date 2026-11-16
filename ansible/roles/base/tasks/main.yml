@@ -1,0 +1,105 @@
+# OS layer: apt repos, packages, the admin user, SSH hardening, sysctl, shell niceties.
+
+- name: Docker apt key (dearmored)
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+    executable: /bin/bash
+
+- name: Is the Tailscale apt key there
+  ansible.builtin.stat:
+    path: /usr/share/keyrings/tailscale-archive-keyring.gpg
+  register: ts_key
+
+- name: Tailscale apt key
+  ansible.builtin.get_url:
+    url: https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    mode: "0644"
+  when: not ts_key.stat.exists
+
+# apt_repository is deprecated in favour of deb822_repository, but switching rewrites the .list files as .sources;
+# that is a separate, deliberate change.
+- name: Docker apt repo
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian trixie stable"
+    filename: docker
+    update_cache: false
+
+- name: Tailscale apt repo
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main"
+    filename: tailscale
+    update_cache: false
+
+- name: Packages
+  ansible.builtin.apt:
+    name: "{{ packages }}"
+    state: present
+
+- name: Admin user and its groups
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    groups: "{{ admin_groups }}"
+    append: true
+
+# The mllab, pipeline and ml4t accounts are created by their own installers (which pick the uids), so only check them.
+- name: Service accounts exist
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+  loop: [mllab, pipeline, ml4t]
+
+- name: Passwordless sudo for the admin user is present and locked down
+  ansible.builtin.stat:
+    path: /etc/sudoers.d/010_homelab-nopasswd
+  register: sudoers_dropin
+
+- name: Check the sudoers drop-in
+  ansible.builtin.assert:
+    that:
+      - sudoers_dropin.stat.exists
+      - sudoers_dropin.stat.mode == '0440'
+      - sudoers_dropin.stat.pw_name == 'root'
+    quiet: true
+
+- name: SSH hardening
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?\\s*{{ item.key }}\\s"
+    line: "{{ item.key }} {{ item.value }}"
+    validate: /usr/sbin/sshd -t -f %s
+  loop: "{{ sshd_settings | dict2items }}"
+  when: sshd_hardening | bool
+  notify: reload ssh
+
+- name: Kernel settings
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: "{{ item.file }}"
+    reload: true
+  loop: "{{ sysctl }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# `allow-hotplug` lets network-online.target fire before DHCP has a lease. Units that wait for the network
+# (smbd, docker) then started without an IPv4 address: after the 2026-10-28 power blip containers had no DNS for a
+# week, and smbd bound to a 169.254 link-local address, so LAN SMB has been closed since boot. `auto` makes
+# networking.service wait for the lease. Takes effect at the next boot; nothing is restarted now.
+- name: Bring the LAN interface up before network-online
+  ansible.builtin.lineinfile:
+    path: /etc/network/interfaces
+    regexp: "^(allow-hotplug|auto) {{ lan_iface }}$"
+    line: "auto {{ lan_iface }}"
+
+- name: Login banner and conda shell hook
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: motd, dest: /etc/motd }
+    - { src: conda.sh, dest: /etc/profile.d/conda.sh }

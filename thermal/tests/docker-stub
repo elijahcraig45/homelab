@@ -1,0 +1,29 @@
+#!/bin/bash
+# Minimal `docker` stand-in for guard-test.sh: tracks NanoCpus per container.
+set -euo pipefail
+S="$STUB_STATE"
+case "${1:-}" in
+  inspect)
+    if [ "${2:-}" = "-f" ]; then
+      name="$4"
+      case "$3" in
+        *NanoCpus*) cat "$S/$name.nanocpus" ;;
+        *State.Running*) if [ -e "$S/$name.stopped" ]; then echo false; else echo true; fi ;;
+        *) echo "" ;;
+      esac
+    else
+      exit 0   # existence probe
+    fi ;;
+  update)
+    shift; cpus=""; name=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cpus) cpus="$2"; shift 2 ;;
+        --cpuset-cpus) shift 2 ;;
+        *) name="$1"; shift ;;
+      esac
+    done
+    awk -v v="$cpus" 'BEGIN{printf "%d", v*1000000000}' > "$S/$name.nanocpus"
+    echo "$name" >> "$S/update.log" ;;
+  *) exit 0 ;;
+esac

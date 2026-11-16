@@ -1,0 +1,25 @@
+# Every file in mllab/host/pipeline/units. Timers and the path unit get enabled and started; the services are
+# started by them.
+pipeline_unit_files:
+  - pipeline.slice
+  - pipeline-job@.service
+  - pipeline-broker-apply.path
+  - pipeline-broker-apply.service
+  - pipeline-broker-snapshot.service
+  - pipeline-broker-snapshot.timer
+  - pipeline-pregame-plan.service
+  - pipeline-pregame-plan.timer
+  - pipeline-pregame-tick.service
+  - pipeline-pregame-tick.timer
+  - pipeline-mlb-2026-daily.timer
+  - pipeline-mlb-2026-power-rankings.timer
+  - pipeline-mlb-2026-roster-refresh.timer
+  - pipeline-nfl-weekly-ingest.timer
+  - pipeline-nfl-weekly-predict.timer
+  - pipeline-nfl-weekly-score.timer
+  - pipeline-nfl-weekly-season-sim.timer
+  - pipeline-cfb-weekly-ingest.timer
+  - pipeline-cfb-weekly-cfbd.timer
+  - pipeline-cfb-weekly-drives.timer
+  - pipeline-cfb-weekly-predict.timer
+  - pipeline-cfb-weekly-season-sim.timer

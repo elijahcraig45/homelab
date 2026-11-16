@@ -1,0 +1,22 @@
+#!/bin/bash
+# Mark a directory for offsite backup by dropping a .backup marker in it.
+#   backup-mark /mnt/storage/files          mark it
+#   backup-mark -r /mnt/storage/files       unmark it
+#   backup-mark -x /mnt/storage/photos/junk exclude a subtree of a marked dir
+set -e
+MODE=add
+while getopts "rx" o; do case $o in r) MODE=remove;; x) MODE=exclude;; esac; done
+shift $((OPTIND-1))
+[ -z "$1" ] && { echo "usage: backup-mark [-r|-x] <directory>"; exit 1; }
+D=$(realpath "$1")
+[ -d "$D" ] || { echo "not a directory: $D"; exit 1; }
+case "$D" in
+  /mnt/storage/media*|/mnt/storage/torrents*)
+    echo "refusing: $D is re-downloadable media, deliberately never backed up."
+    echo "  (media is what makes offsite affordable - see BUILD-LOG)"; exit 1;;
+esac
+case $MODE in
+  add)     touch "$D/.backup";   rm -f "$D/.nobackup"; echo "marked for backup:  $D";;
+  remove)  rm -f "$D/.backup";                          echo "unmarked:           $D";;
+  exclude) touch "$D/.nobackup"; rm -f "$D/.backup";    echo "excluded subtree:   $D";;
+esac

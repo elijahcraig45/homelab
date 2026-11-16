@@ -1,0 +1,40 @@
+#!/bin/bash
+# Show exactly what is and is not covered by offsite backup.
+ROOTS="/mnt/storage /mnt/appdata"
+echo "OFFSITE BACKUP COVERAGE   ->  gs://<backup-bucket> (project: <backup-project>)"
+echo
+echo "ALWAYS (implicit, cannot be forgotten):"
+printf "  %-34s %s\n" "/mnt/appdata" "$(sudo du -sh /mnt/appdata 2>/dev/null | cut -f1)  container configs + databases"
+echo
+echo "MARKED (.backup present):"
+found=0
+for r in $ROOTS; do
+  while IFS= read -r m; do
+    d=$(dirname "$m"); [ "$d" = "/mnt/appdata" ] && continue
+    printf "  %-34s %s\n" "$d" "$(sudo du -sh "$d" 2>/dev/null | cut -f1)"; found=1
+  done < <(sudo find "$r" -maxdepth 4 -name .backup 2>/dev/null)
+done
+[ "$found" = "0" ] && echo "  (none yet - use: backup-mark <dir>)"
+echo
+echo "EXCLUDED subtrees (.nobackup present):"
+ex=0
+for r in $ROOTS; do
+  while IFS= read -r m; do printf "  %-34s\n" "$(dirname "$m")"; ex=1; done < <(sudo find "$r" -maxdepth 5 -name .nobackup 2>/dev/null)
+done
+[ "$ex" = "0" ] && echo "  (none)"
+echo
+echo "NEVER (hardcoded - re-downloadable, would cost a fortune):"
+for p in /mnt/storage/media /mnt/storage/torrents; do
+  printf "  %-34s %s\n" "$p" "$(sudo du -sh $p 2>/dev/null | cut -f1)"
+done
+echo
+echo "NOT COVERED (no marker - add one if it matters):"
+for d in /mnt/storage/*/; do
+  d=${d%/}
+  case "$d" in /mnt/storage/media|/mnt/storage/torrents) continue;; esac
+  [ -f "$d/.backup" ] && continue
+  printf "  %-34s %s\n" "$d" "$(sudo du -sh "$d" 2>/dev/null | cut -f1)"
+done
+echo
+LAST=/var/log/backup/last-run.txt
+[ -f "$LAST" ] && { echo "LAST RUN:"; sed 's/^/  /' "$LAST"; } || echo "LAST RUN: never"

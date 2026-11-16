@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""External watchdog on the Pi 3: alert if pihome goes unreachable.
+Covers the one case Kuma cannot — Kuma runs ON pihome, so it can't report pihome down.
+Requires 2 consecutive failures before alerting (ignores a transient blip)."""
+import json, os, socket, subprocess, time
+ASTATE = "/var/lib/pihome-watchdog/state.json"
+HOST = "<pi-lan-ip>"
+# ports reachable from the LAN: ssh (ufw allows LAN) + immich (docker-published)
+CHECKS = [22, 2283]
+RENOTIFY = 1800
+os.makedirs("/var/lib/pihome-watchdog", exist_ok=True)
+def load():
+    try: return json.load(open(ASTATE))
+    except Exception: return {"down": False, "at": 0, "fails": 0}
+def ntfy(title, msg, prio, tags):
+    try: subprocess.run(["/usr/local/bin/ntfy-send", title, msg, prio, tags], timeout=15)
+    except Exception: pass
+def reachable():
+    for port in CHECKS:
+        try:
+            socket.create_connection((HOST, port), timeout=5).close(); return True
+        except Exception: continue
+    return False
+a = load(); now = time.time()
+if not reachable():
+    a["fails"] = a.get("fails", 0) + 1
+    if a["fails"] >= 2 and (not a["down"] or now - a["at"] > RENOTIFY):
+        ntfy("\U0001f534 pihome UNREACHABLE",
+             "pihome isn't answering on the LAN (ssh + immich both failed). Server may be down.",
+             "urgent", "rotating_light,skull")
+        a["down"] = True; a["at"] = now
+else:
+    if a.get("down"):
+        ntfy("\U0001f7e2 pihome back up", "pihome is reachable again.", "default", "white_check_mark")
+    a = {"down": False, "at": now, "fails": 0}
+json.dump(a, open(ASTATE, "w"))

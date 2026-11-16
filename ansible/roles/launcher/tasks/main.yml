@@ -1,0 +1,28 @@
+# The tailnet home page: Caddy (a container in the stack) serves the launcher and proxies the status page.
+- name: Launcher web root
+  ansible.builtin.file:
+    path: /var/www/pihome
+    state: directory
+    mode: "0700"
+
+- name: Launcher page
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/launcher/index.html"
+    dest: /var/www/pihome/index.html
+    mode: "0644"
+
+- name: Launcher Caddyfile
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/launcher/Caddyfile"
+    dest: /etc/caddy-pihome.Caddyfile
+    mode: "0644"
+  notify: reload launcher caddy
+
+- name: Live status page
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ repo_root }}/status/pihome-status", dest: /usr/local/bin/pihome-status, mode: "0755" }
+      - { src: "{{ repo_root }}/status/systemd/pihome-status.service", dest: /etc/systemd/system/pihome-status.service }
+    managed_units:
+      - { name: pihome-status.service, enabled: true, state: started }

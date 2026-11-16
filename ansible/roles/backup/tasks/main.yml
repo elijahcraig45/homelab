@@ -1,0 +1,26 @@
+# Nightly backup: local appdata snapshot + offsite copy to GCS (backup/backup-run).
+- name: Backup scripts and units
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/files_and_units.yml"
+  vars:
+    managed_files:
+      - { src: "{{ repo_root }}/backup/backup-run",    dest: /usr/local/bin/backup-run,    mode: "0755" }
+      - { src: "{{ repo_root }}/backup/backup-mark",   dest: /usr/local/bin/backup-mark,   mode: "0755" }
+      - { src: "{{ repo_root }}/backup/backup-status", dest: /usr/local/bin/backup-status, mode: "0755" }
+      - { src: "{{ repo_root }}/backup/systemd/backup-offsite.service", dest: /etc/systemd/system/backup-offsite.service }
+      - { src: "{{ repo_root }}/backup/systemd/backup-offsite.timer",   dest: /etc/systemd/system/backup-offsite.timer }
+    managed_units:
+      - { name: backup-offsite.timer, enabled: true, state: started }
+
+# Directories marked with .backup go offsite. A .nobackup marker excludes a subdirectory.
+- name: Offsite markers
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+    access_time: preserve
+    modification_time: preserve
+  loop: "{{ backup_markers }}"
+  loop_control:
+    label: "{{ item.path }}"

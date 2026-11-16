@@ -1,0 +1,4 @@
+# Control-machine tooling. Install into ansible/.venv:
+#   uv venv ansible/.venv && uv pip install --python ansible/.venv/bin/python -r ansible/requirements.txt
+# The full `ansible` package bundles community.general, community.docker and ansible.posix.
+ansible==14.6.0
